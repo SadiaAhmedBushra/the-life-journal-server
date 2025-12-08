@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const { ObjectId } = require("mongodb"); 
 const app = express();
 require("dotenv").config();
 const { MongoClient, ServerApiVersion } = require("mongodb");
@@ -38,12 +39,14 @@ async function run() {
           query.email = email;
         }
 
+        const options = {sort: { createdAt: -1 }};
+
         // all lessons
         const allLessons = await lessonCollection.find({}).toArray();
         console.log("All Lessons:", allLessons);
 
         // filtered lessons
-        const result = await lessonCollection.find(query).toArray();
+        const result = await lessonCollection.find(query, options).toArray();
         console.log("Lessons Filtered by User Email:", result);
 
         res.send(result); 
@@ -53,12 +56,22 @@ async function run() {
       }
     });
 
+    // post lesson
     app.post("/lessons", async (req, res) => {
       const lesson = req.body;
       console.log(lesson);
       const result = await lessonCollection.insertOne(lesson);
       res.send(result);
     });
+
+    // delete lesson
+    app.delete("/lessons/:id", async (req, res) => {
+      const id = req.params.id; 
+      const query = { _id: new ObjectId(id) };
+      const result = await lessonCollection.deleteOne(query);
+      res.send(result);
+    });
+
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
