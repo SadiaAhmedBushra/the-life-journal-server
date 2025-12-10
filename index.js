@@ -1,8 +1,9 @@
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { ObjectId } = require("mongodb");
+const stripe = require("stripe")(process.env.STRIPE_SECRET);
 const app = express();
-require("dotenv").config();
 const { MongoClient, ServerApiVersion } = require("mongodb");
 
 const port = process.env.PORT || 3000;
@@ -23,7 +24,6 @@ const client = new MongoClient(uri, {
 
 async function run() {
   try {
-    // Connect the client to the server	(optional starting in v4.7)
     await client.connect();
     const db = client.db("the-life-journal-db");
     const lessonCollection = db.collection("lessons");
@@ -79,14 +79,13 @@ async function run() {
 
       userData.createdAt = new Date().toISOString();
       userData.last_loggedIn = new Date().toISOString();
-      userData.role = 'freeUser';
+      userData.role = "freeUser";
 
       const userQuery = { email: userData.email };
 
       const alreadyExists = await userCollection.findOne(userQuery);
 
       if (alreadyExists) {
-
         const result = await userCollection.updateOne(userQuery, {
           $set: {
             last_loggedIn: new Date().toISOString(),
@@ -98,14 +97,94 @@ async function run() {
       res.send(result);
 
       console.log(userData);
-      // const filter = { email: userData.email };
-      // const options = { upsert: true };
-      // const updateDoc = { $set: userData };
-      // const result = await userCollection.updateOne(
-      //   filter,
-      //   updateDoc,
-      //   options
-      // );
+    });
+
+    // user role
+    app.get("/users/role/:email", async (req, res) => {
+      const email = req.params.email;
+      const query = { email: email };
+      const user = await userCollection.findOne(query);
+      res.send({ role: user?.role });
+    });
+
+    // payment apis
+    app.post("/create-checkout-session", async (req, res) => {
+      const paymentInfo = req.body;
+      console.log(paymentInfo);
+      const session = await stripe.checkout.sessions.create({
+        line_items: [
+          {
+            price_data: {
+              currency: "usd",
+              product_data: {
+                name: paymentInfo?.name,
+                description: paymentInfo?.description,
+                images: [paymentInfo.image],
+              },
+              unit_amount: paymentInfo?.price * 100,
+            },
+            quantity: paymentInfo?.quantity,
+          },
+        ],
+        mode: "payment",
+        metadata: {
+          customer: paymentInfo?.email,
+        },
+
+        success_url: `${process.env.SITE_DOMAIN}/payment/success`,
+        cancel_url: `${process.env.SITE_DOMAIN}/payment/cancelled`,
+      });
+      res.send({ url: session.url });
+    });
+
+    app.post(
+      "/webhook",
+      express.raw({ type: "application/json" }),
+      (request, response) => {
+        const sig = request.headers["stripe-signature"];
+        let event;
+
+        try {
+          event = stripe.webhooks.constructEvent(
+            request.body,
+            sig,
+            process.env.STRIPE_WEBHOOK_SECRET
+          );
+        } catch (err) {
+          return response.status(400).send(`Webhook Error: ${err.message}`);
+        }
+
+        if (event.type === "checkout.session.completed") {
+          const session = event.data.object;
+          const customerEmail = session.metadata.customer;
+
+          userCollection.updateOne(
+            { email: customerEmail },
+            { $set: { isPremium: true, role: "premiumUser" } }
+          );
+        }
+
+        response.send();
+      }
+    );
+
+    app.get("/lessons/:id", async (req, res) => {
+      const id = req.params.id;
+
+      try {
+        const result = await lessonCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!result) {
+          return res.status(404).send({ message: "Lesson not found" });
+        }
+
+        res.send(result);
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ message: "Invalid ID format" });
+      }
     });
 
     // Send a ping to confirm a successful connection
