@@ -29,6 +29,8 @@ async function run() {
     const lessonCollection = db.collection("lessons");
     const userCollection = db.collection("users");
 
+    console.log("STRIPE", process.env.STRIPE_SECRET);
+
     // lesson api
     app.get("/lessons", async (req, res) => {
       try {
@@ -100,73 +102,117 @@ async function run() {
     });
 
     // user role
+    //   app.get("/users/role/:email", async (req, res) => {
+    //     const email = req.params.email;
+    //     const query = { email: email };
+    //     const user = await userCollection.findOne(query);
+    //     res.send({ role: user?.role,
+    //   // paymentStatus: user?.paymentStatus || "unpaid",
+    //  });
+    //   });
+
+    // user role
     app.get("/users/role/:email", async (req, res) => {
       const email = req.params.email;
       const query = { email: email };
       const user = await userCollection.findOne(query);
-      res.send({ role: user?.role });
-    });
 
-    // payment apis
-    app.post("/create-checkout-session", async (req, res) => {
-      const paymentInfo = req.body;
-      console.log(paymentInfo);
-      const session = await stripe.checkout.sessions.create({
-        line_items: [
-          {
-            price_data: {
-              currency: "usd",
-              product_data: {
-                name: paymentInfo?.name,
-                description: paymentInfo?.description,
-                images: [paymentInfo.image],
-              },
-              unit_amount: paymentInfo?.price * 100,
-            },
-            quantity: paymentInfo?.quantity,
-          },
-        ],
-        mode: "payment",
-        metadata: {
-          customer: paymentInfo?.email,
-        },
-
-        success_url: `${process.env.SITE_DOMAIN}/payment/success`,
-        cancel_url: `${process.env.SITE_DOMAIN}/payment/cancelled`,
-      });
-      res.send({ url: session.url });
-    });
-
-    app.post(
-      "/webhook",
-      express.raw({ type: "application/json" }),
-      (request, response) => {
-        const sig = request.headers["stripe-signature"];
-        let event;
-
-        try {
-          event = stripe.webhooks.constructEvent(
-            request.body,
-            sig,
-            process.env.STRIPE_WEBHOOK_SECRET
-          );
-        } catch (err) {
-          return response.status(400).send(`Webhook Error: ${err.message}`);
-        }
-
-        if (event.type === "checkout.session.completed") {
-          const session = event.data.object;
-          const customerEmail = session.metadata.customer;
-
-          userCollection.updateOne(
-            { email: customerEmail },
-            { $set: { isPremium: true, role: "premiumUser" } }
-          );
-        }
-
-        response.send();
+      if (!user) {
+        return res.send({
+          role: "General",
+          paymentStatus: "Unpaid",
+        });
       }
-    );
+
+      res.send({
+        role: user.role,
+        paymentStatus: user.paymentStatus || "Unpaid",
+      });
+    });
+
+    // payment api - module
+    app.post("/payment-checkout-session", async (req, res) => {
+      const paymentInfo = req.body;
+
+      try {
+        const session = await stripe.checkout.sessions.create({
+          line_items: [
+            {
+              price_data: {
+                currency: "usd",
+                product_data: {
+                  name: paymentInfo?.name,
+                  // description: paymentInfo?.description,
+                  // images: [paymentInfo.image],
+                },
+                unit_amount: paymentInfo?.price * 100,
+              },
+              quantity: paymentInfo?.quantity,
+            },
+          ],
+          mode: "payment",
+          metadata: {
+            customer: paymentInfo?.email,
+          },
+          success_url: `${process.env.SITE_DOMAIN}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.SITE_DOMAIN}/payment/cancelled`,
+        });
+
+        res.send({ url: session.url });
+      } catch (error) {
+        console.error("Stripe checkout session error:", error);
+      }
+    });
+
+    // app.patch("/payment/success", async (req, res) => {
+    //   const sessionId = req.query.session_id;
+    //   // console.log("session id", sessionId);
+
+    //   const session = await stripe.checkout.sessions.retrieve(sessionId);
+    //   console.log("session retrieved", session);
+    //   if (session.payment_status === "paid") {
+    //     const u_email = session.metadata.customer;
+
+    //     const query = { _id: new ObjectId(u_email) };
+    //     const update = {
+    //       $set: {
+    //         paymentStatus: "paid",
+    //         role: "premium",
+    //       },
+    //     };
+    //     // const result = await userCollection.updateOne(filter, update);
+    //     const result = await userCollection.updateOne(
+
+    //     );
+    //     res.send({ success: true });
+    //   }
+    //   res.send({ success: false });
+    // });
+
+    app.patch("/payment/success", async (req, res) => {
+      const sessionId = req.query.session_id;
+      const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+      console.log("session retrieved", session);
+
+      if (session.payment_status === "paid") {
+        const email = session.metadata.customer;
+
+        const result = await userCollection.updateOne(
+          { email: email },
+          {
+            $set: {
+              paymentStatus: "Paid",
+              role: "Premium",
+            },
+          }
+        );
+
+        return res.send({ success: true, updated: result });
+      }
+
+      res.send({ success: false });
+    });
 
     app.get("/lessons/:id", async (req, res) => {
       const id = req.params.id;
