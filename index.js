@@ -12,6 +12,16 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// const verifyFBToken = (req, res, next) => {
+//   console.log('headers in the Middleware', req.headers.authorization)
+//   const token = req.headers.authorization;
+//   if(!token)
+//   {
+//     return res.status(401).send({message: 'unauthorized access'})
+//   }
+// next();
+// }
+
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.lpz93gz.mongodb.net/?appName=Cluster0`;
 
 const client = new MongoClient(uri, {
@@ -115,6 +125,9 @@ async function run() {
     app.get("/users/role/:email", async (req, res) => {
       const email = req.params.email;
       const query = { email: email };
+
+      // console.log('headers', req.headers);
+
       const user = await userCollection.findOne(query);
 
       if (!user) {
@@ -130,63 +143,101 @@ async function run() {
       });
     });
 
-    // payment api - module
-    app.post("/payment-checkout-session", async (req, res) => {
-      const paymentInfo = req.body;
+    // patch for like
+    app.patch("/lessons/:id/like", async (req, res) => {
+      const lessonId = req.params.id;
+      const { userId } = req.body; // email
+
+      if (!userId) {
+        return res.status(400).send({ error: "Missing userId" });
+      }
 
       try {
-        const session = await stripe.checkout.sessions.create({
-          line_items: [
-            {
-              price_data: {
-                currency: "usd",
-                product_data: {
-                  name: paymentInfo?.name,
-                  // description: paymentInfo?.description,
-                  // images: [paymentInfo.image],
-                },
-                unit_amount: paymentInfo?.price * 100,
-              },
-              quantity: paymentInfo?.quantity,
-            },
-          ],
-          mode: "payment",
-          metadata: {
-            customer: paymentInfo?.email,
-          },
-          success_url: `${process.env.SITE_DOMAIN}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
-          cancel_url: `${process.env.SITE_DOMAIN}/payment/cancelled`,
+        const lesson = await lessonCollection.findOne({
+          _id: new ObjectId(lessonId),
         });
 
-        res.send({ url: session.url });
-      } catch (error) {
-        console.error("Stripe checkout session error:", error);
+        if (!lesson) return res.status(404).send({ error: "Lesson not found" });
+
+        const likes = lesson.likes || [];
+        const userHasLiked = likes.includes(userId);
+
+        const update = userHasLiked
+          ? { $pull: { likes: userId }, $inc: { likesCount: -1 } }
+          : { $addToSet: { likes: userId }, $inc: { likesCount: 1 } };
+
+        await lessonCollection.updateOne(
+          { _id: new ObjectId(lessonId) },
+          update
+        );
+
+        res.send({
+          success: true,
+          liked: !userHasLiked,
+          likesCountChange: userHasLiked ? -1 : 1,
+        });
+      } catch (err) {
+        res.status(500).send({ error: "Failed to toggle like" });
       }
     });
 
-    // app.patch("/payment/success", async (req, res) => {
-    //   const sessionId = req.query.session_id;
-    //   // console.log("session id", sessionId);
+    // post fpr report
+    app.post("/lessons/:id/report", async (req, res) => {
+      const { reporterUserId, reason } = req.body;
 
-    //   const session = await stripe.checkout.sessions.retrieve(sessionId);
-    //   console.log("session retrieved", session);
-    //   if (session.payment_status === "paid") {
-    //     const u_email = session.metadata.customer;
+      if (!reporterUserId || !reason) {
+        return res
+          .status(400)
+          .send({ error: "Missing reporterUserId or reason" });
+      }
 
-    //     const query = { _id: new ObjectId(u_email) };
-    //     const update = {
-    //       $set: {
-    //         paymentStatus: "paid",
-    //         role: "premium",
+      const reportCollection = client
+        .db("the-life-journal-db")
+        .collection("lessonReports");
+
+      const doc = {
+        lessonId: new ObjectId(req.params.id),
+        reporterUserId,
+        reason,
+        timestamp: new Date(),
+      };
+
+      await reportCollection.insertOne(doc);
+
+      res.send({ success: true, message: "Report submitted successfully" });
+    });
+
+    // payment api - module
+    // app.post("/payment-checkout-session", verifyFBToken, async (req, res) => {
+    // app.post("/payment-checkout-session", async (req, res) => {
+    //   const paymentInfo = req.body;
+
+    //   try {
+    //     const session = await stripe.checkout.sessions.create({
+    //       line_items: [
+    //         {
+    //           price_data: {
+    //             currency: "usd",
+    //             product_data: {
+    //               name: paymentInfo?.name,
+    //             },
+    //             unit_amount: paymentInfo?.price * 100,
+    //           },
+    //           quantity: paymentInfo?.quantity,
+    //         },
+    //       ],
+    //       mode: "payment",
+    //       metadata: {
+    //         customer: paymentInfo?.email,
     //       },
-    //     };
-    //     // const result = await userCollection.updateOne(filter, update);
-    //     const result = await userCollection.updateOne(
+    //       success_url: `${process.env.SITE_DOMAIN}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+    //       cancel_url: `${process.env.SITE_DOMAIN}/payment/cancelled`,
+    //     });
 
-    //     );
-    //     res.send({ success: true });
+    //     res.send({ url: session.url });
+    //   } catch (error) {
+    //     console.error("Stripe checkout session error:", error);
     //   }
-    //   res.send({ success: false });
     // });
 
     app.patch("/payment/success", async (req, res) => {
@@ -230,6 +281,37 @@ async function run() {
       } catch (error) {
         console.error(error);
         res.status(500).send({ message: "Invalid ID format" });
+      }
+    });
+
+    // edit lesson
+    app.put("/lessons/:id", async (req, res) => {
+      const lessonId = req.params.id;
+
+      if (!ObjectId.isValid(lessonId)) {
+        return res.status(400).send({ error: "Invalid lesson ID format" });
+      }
+
+      const updateData = req.body;
+      const { _id, ...fieldsToUpdate } = updateData; // prevent _id updates
+      fieldsToUpdate.updatedAt = new Date();
+
+      try {
+        const filter = { _id: new ObjectId(lessonId) };
+        const updateResult = await lessonCollection.updateOne(filter, {
+          $set: fieldsToUpdate,
+        });
+
+        if (updateResult.matchedCount === 0) {
+          return res.status(404).send({ message: "Lesson not found" });
+        }
+
+        const updatedLesson = await lessonCollection.findOne(filter);
+
+        res.send(updatedLesson);
+      } catch (error) {
+        console.error("Failed to update lesson:", error);
+        res.status(500).send({ error: "Failed to update lesson" });
       }
     });
 
