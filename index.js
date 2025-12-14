@@ -1,26 +1,14 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const { ObjectId } = require("mongodb");
+const { ObjectId, MongoClient, ServerApiVersion } = require("mongodb");
 const stripe = require("stripe")(process.env.STRIPE_SECRET);
-const app = express();
-const { MongoClient, ServerApiVersion } = require("mongodb");
 
+const app = express();
 const port = process.env.PORT || 3000;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
-
-// const verifyFBToken = (req, res, next) => {
-//   console.log('headers in the Middleware', req.headers.authorization)
-//   const token = req.headers.authorization;
-//   if(!token)
-//   {
-//     return res.status(401).send({message: 'unauthorized access'})
-//   }
-// next();
-// }
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.lpz93gz.mongodb.net/?appName=Cluster0`;
 
@@ -32,57 +20,97 @@ const client = new MongoClient(uri, {
   },
 });
 
+const today = new Date();
+const day = today.getDay();
+const diff = today.getDate() - day + (day === 0 ? -6 : 1);
+const monday = new Date(today.setDate(diff));
+monday.setHours(0, 0, 0, 0);
+
 async function run() {
   try {
     await client.connect();
     const db = client.db("the-life-journal-db");
     const lessonCollection = db.collection("lessons");
     const userCollection = db.collection("users");
+    const commentCollection = db.collection("comments");
+    const reportCollection = db.collection("lessonReports");
 
-    console.log("STRIPE", process.env.STRIPE_SECRET);
-
-    // lesson api
+    // get lesson, and filtering for similar lessons
     app.get("/lessons", async (req, res) => {
       try {
         const query = {};
-        const { email } = req.query;
-        console.log("QUERY EMAIL:", email);
 
-        if (email) {
-          query.email = email;
+        if (req.query.email) query.email = req.query.email;
+
+        const { category, emotionalTone, privacy } = req.query;
+
+        if (privacy) {
+          query.privacy = privacy;
         }
 
-        const options = { sort: { createdAt: -1 } };
+        if (category && emotionalTone) {
+          query.$or = [{ category }, { emotionalTone }];
+        } else if (category) {
+          query.category = category;
+        } else if (emotionalTone) {
+          query.emotionalTone = emotionalTone;
+        }
 
-        // all lessons
-        const allLessons = await lessonCollection.find({}).toArray();
-        console.log("All Lessons:", allLessons);
+        const limit = parseInt(req.query.limit) || 0;
 
-        // filtered lessons
-        const result = await lessonCollection.find(query, options).toArray();
-        console.log("Lessons Filtered by User Email:", result);
+        const options = {
+          sort: { createdAt: -1 },
+          ...(limit > 0 && { limit }),
+        };
 
-        res.send(result);
+        const lessons = await lessonCollection.find(query, options).toArray();
+        res.send(lessons);
       } catch (error) {
-        console.error("Error fetching lessons:", error);
+        console.error(error);
         res.status(500).send({ error: "Failed to fetch lessons" });
       }
     });
 
-    // post lesson
-    app.post("/lessons", async (req, res) => {
-      const lesson = req.body;
-      console.log(lesson);
-      const result = await lessonCollection.insertOne(lesson);
-      res.send(result);
+    // GET lesson by ID
+    app.get("/lessons/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const lesson = await lessonCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!lesson)
+          return res.status(404).send({ message: "Lesson not found" });
+        res.send(lesson);
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ error: "Invalid lesson ID format" });
+      }
     });
 
-    // delete lesson
+    // POST new lesson
+    app.post("/lessons", async (req, res) => {
+      try {
+        const lesson = req.body;
+        const result = await lessonCollection.insertOne(lesson);
+        res.send(result);
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ error: "Failed to create lesson" });
+      }
+    });
+
+    // DELETE lesson by ID
     app.delete("/lessons/:id", async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await lessonCollection.deleteOne(query);
-      res.send(result);
+      try {
+        const id = req.params.id;
+        const result = await lessonCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+        res.send(result);
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ error: "Failed to delete lesson" });
+      }
     });
 
     //  save or update user
@@ -111,134 +139,37 @@ async function run() {
       console.log(userData);
     });
 
-    // user role
-    //   app.get("/users/role/:email", async (req, res) => {
-    //     const email = req.params.email;
-    //     const query = { email: email };
-    //     const user = await userCollection.findOne(query);
-    //     res.send({ role: user?.role,
-    //   // paymentStatus: user?.paymentStatus || "unpaid",
-    //  });
-    //   });
-
-    // user role
-    app.get("/users/role/:email", async (req, res) => {
-      const email = req.params.email;
-      const query = { email: email };
-
-      // console.log('headers', req.headers);
-
-      const user = await userCollection.findOne(query);
-
-      if (!user) {
-        return res.send({
-          role: "General",
-          paymentStatus: "Unpaid",
-        });
-      }
-
-      res.send({
-        role: user.role,
-        paymentStatus: user.paymentStatus || "Unpaid",
-      });
-    });
-
-    // patch for like
-    app.patch("/lessons/:id/like", async (req, res) => {
-      const lessonId = req.params.id;
-      const { userId } = req.body; // email
-
-      if (!userId) {
-        return res.status(400).send({ error: "Missing userId" });
-      }
+    // payment api - module
+    //  app.post("/payment-checkout-session", verifyFBToken, async (req, res) => {
+    app.post("/payment-checkout-session", async (req, res) => {
+      const paymentInfo = req.body;
 
       try {
-        const lesson = await lessonCollection.findOne({
-          _id: new ObjectId(lessonId),
+        const session = await stripe.checkout.sessions.create({
+          line_items: [
+            {
+              price_data: {
+                currency: "usd",
+                product_data: {
+                  name: paymentInfo?.name,
+                },
+                unit_amount: paymentInfo?.price * 100,
+              },
+              quantity: paymentInfo?.quantity,
+            },
+          ],
+          mode: "payment",
+          metadata: {
+            customer: paymentInfo?.email,
+          },
+          success_url: `${process.env.SITE_DOMAIN}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.SITE_DOMAIN}/payment/cancelled`,
         });
-
-        if (!lesson) return res.status(404).send({ error: "Lesson not found" });
-
-        const likes = lesson.likes || [];
-        const userHasLiked = likes.includes(userId);
-
-        const update = userHasLiked
-          ? { $pull: { likes: userId }, $inc: { likesCount: -1 } }
-          : { $addToSet: { likes: userId }, $inc: { likesCount: 1 } };
-
-        await lessonCollection.updateOne(
-          { _id: new ObjectId(lessonId) },
-          update
-        );
-
-        res.send({
-          success: true,
-          liked: !userHasLiked,
-          likesCountChange: userHasLiked ? -1 : 1,
-        });
-      } catch (err) {
-        res.status(500).send({ error: "Failed to toggle like" });
+        res.send({ url: session.url });
+      } catch (error) {
+        console.error("Stripe checkout session error:", error);
       }
     });
-
-    // post fpr report
-    app.post("/lessons/:id/report", async (req, res) => {
-      const { reporterUserId, reason } = req.body;
-
-      if (!reporterUserId || !reason) {
-        return res
-          .status(400)
-          .send({ error: "Missing reporterUserId or reason" });
-      }
-
-      const reportCollection = client
-        .db("the-life-journal-db")
-        .collection("lessonReports");
-
-      const doc = {
-        lessonId: new ObjectId(req.params.id),
-        reporterUserId,
-        reason,
-        timestamp: new Date(),
-      };
-
-      await reportCollection.insertOne(doc);
-
-      res.send({ success: true, message: "Report submitted successfully" });
-    });
-
-    // payment api - module
-    // app.post("/payment-checkout-session", verifyFBToken, async (req, res) => {
-    // app.post("/payment-checkout-session", async (req, res) => {
-    //   const paymentInfo = req.body;
-
-    //   try {
-    //     const session = await stripe.checkout.sessions.create({
-    //       line_items: [
-    //         {
-    //           price_data: {
-    //             currency: "usd",
-    //             product_data: {
-    //               name: paymentInfo?.name,
-    //             },
-    //             unit_amount: paymentInfo?.price * 100,
-    //           },
-    //           quantity: paymentInfo?.quantity,
-    //         },
-    //       ],
-    //       mode: "payment",
-    //       metadata: {
-    //         customer: paymentInfo?.email,
-    //       },
-    //       success_url: `${process.env.SITE_DOMAIN}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
-    //       cancel_url: `${process.env.SITE_DOMAIN}/payment/cancelled`,
-    //     });
-
-    //     res.send({ url: session.url });
-    //   } catch (error) {
-    //     console.error("Stripe checkout session error:", error);
-    //   }
-    // });
 
     app.patch("/payment/success", async (req, res) => {
       const sessionId = req.query.session_id;
@@ -265,6 +196,24 @@ async function run() {
       res.send({ success: false });
     });
 
+    // get user role and paymentStatus
+    app.get("/users/role/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+        const user = await userCollection.findOne({ email });
+        if (!user) return res.status(404).send({ error: "User not found" });
+
+        res.send({
+          role: user.role || "user",
+          paymentStatus: user.paymentStatus || "unpaid",
+        });
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ error: "Failed to fetch user role" });
+      }
+    });
+
+    //  get lesson
     app.get("/lessons/:id", async (req, res) => {
       const id = req.params.id;
 
@@ -315,22 +264,285 @@ async function run() {
       }
     });
 
-    // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
-  } finally {
-    // Ensures that the client will close when you finish/error
-    // await client.close();
+    // PATCH toggle like
+    app.patch("/lessons/:id/like", async (req, res) => {
+      try {
+        const lessonId = req.params.id;
+        const { userId } = req.body;
+        if (!userId) return res.status(400).send({ error: "Missing userId" });
+
+        const lesson = await lessonCollection.findOne({
+          _id: new ObjectId(lessonId),
+        });
+        if (!lesson) return res.status(404).send({ error: "Lesson not found" });
+
+        const likes = lesson.likes || [];
+        const userHasLiked = likes.includes(userId);
+
+        const update = userHasLiked
+          ? { $pull: { likes: userId }, $inc: { likesCount: -1 } }
+          : { $addToSet: { likes: userId }, $inc: { likesCount: 1 } };
+
+        await lessonCollection.updateOne(
+          { _id: new ObjectId(lessonId) },
+          update
+        );
+
+        res.send({
+          success: true,
+          liked: !userHasLiked,
+          likesCountChange: userHasLiked ? -1 : 1,
+        });
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ error: "Failed to toggle like" });
+      }
+    });
+
+    // PATCH toggle favorite
+    app.patch("/lessons/:id/favorite", async (req, res) => {
+      try {
+        const lessonId = req.params.id;
+        const { userId } = req.body;
+        if (!userId) return res.status(400).send({ error: "Missing userId" });
+
+        const lesson = await lessonCollection.findOne({
+          _id: new ObjectId(lessonId),
+        });
+        if (!lesson) return res.status(404).send({ error: "Lesson not found" });
+
+        const favorites = lesson.favorites || [];
+        const userHasFavorited = favorites.includes(userId);
+
+        const update = userHasFavorited
+          ? { $pull: { favorites: userId }, $inc: { favoritesCount: -1 } }
+          : { $addToSet: { favorites: userId }, $inc: { favoritesCount: 1 } };
+
+        await lessonCollection.updateOne(
+          { _id: new ObjectId(lessonId) },
+          update
+        );
+
+        res.send({
+          success: true,
+          favorited: !userHasFavorited,
+          favoritesCountChange: userHasFavorited ? -1 : 1,
+        });
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ error: "Failed to toggle favorite" });
+      }
+    });
+
+    // post fpr report
+    app.post("/lessons/:id/report", async (req, res) => {
+      const { reporterUserId, reason } = req.body;
+
+      if (!reporterUserId || !reason) {
+        return res
+          .status(400)
+          .send({ error: "Missing reporterUserId or reason" });
+      }
+
+      const reportCollection = client
+        .db("the-life-journal-db")
+        .collection("lessonReports");
+
+      const doc = {
+        lessonId: new ObjectId(req.params.id),
+        reporterUserId,
+        reason,
+        timestamp: new Date(),
+      };
+
+      await reportCollection.insertOne(doc);
+
+      res.send({ success: true, message: "Report submitted successfully" });
+    });
+
+    const pipeline = [
+      {
+        $addFields: {
+          createdAtDate: { $toDate: "$createdAt" },
+        },
+      },
+      {
+        $match: { createdAtDate: { $gte: monday } },
+      },
+      {
+        $group: { _id: "$email", lessonsCount: { $sum: 1 } },
+      },
+      { $sort: { lessonsCount: -1 } },
+      { $limit: 5 },
+      {
+        $lookup: {
+          from: "users",
+          localField: "_id",
+          foreignField: "email",
+          as: "userInfo",
+        },
+      },
+      { $unwind: { path: "$userInfo", preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          userEmail: "$_id",
+          lessonsCount: 1,
+          name: "$userInfo.name",
+          _id: 0,
+        },
+      },
+    ];
+
+    app.get("/analytics/most-saved-lessons", async (req, res) => {
+      try {
+        const lessons = await lessonCollection
+          .find({
+            favoritesCount: { $gt: 0 },
+          })
+          .sort({ favoritesCount: -1 })
+          .limit(3)
+          .toArray();
+
+        res.send(lessons);
+      } catch (error) {
+        console.error("Failed to fetch most saved lessons:", error);
+        res.status(500).send({ message: "Failed to fetch most saved lessons" });
+      }
+    });
+
+    // get for top contributors
+    app.get("/analytics/top-contributors-week", async (req, res) => {
+      try {
+        const pipeline = [
+          {
+            $addFields: {
+              createdAtDate: { $toDate: "$createdAt" },
+            },
+          },
+          {
+            $match: { createdAtDate: { $gte: monday } },
+          },
+          {
+            $group: { _id: "$email", lessonsCount: { $sum: 1 } },
+          },
+          { $sort: { lessonsCount: -1 } },
+          { $limit: 3 },
+          {
+            $lookup: {
+              from: "users",
+              localField: "_id",
+              foreignField: "email",
+              as: "userInfo",
+            },
+          },
+          { $unwind: { path: "$userInfo", preserveNullAndEmptyArrays: true } },
+          {
+            $project: {
+              userEmail: "$_id",
+              lessonsCount: 1,
+              name: "$userInfo.name",
+              _id: 0,
+            },
+          },
+        ];
+
+        const topContributors = await lessonCollection
+          .aggregate(pipeline)
+          .toArray();
+        res.json(topContributors);
+      } catch (error) {
+        console.error("Failed to fetch top contributors:", error);
+        res.status(500).json({ message: "Failed to fetch top contributors" });
+      }
+    });
+
+    // get favorited lessons by a user
+    app.get("/users/favorites/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+        if (!email)
+          return res.status(400).send({ error: "Missing user email" });
+
+        // Find lessons where favorites array includes this user email
+        const favorites = await lessonCollection
+          .find({ favorites: email })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.send(favorites);
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ error: "Failed to fetch user's favorites" });
+      }
+    });
+
+    // post new comment
+    app.post("/comments", async (req, res) => {
+      try {
+        const comment = req.body;
+        if (!comment.lessonId || !comment.userId || !comment.text)
+          return res
+            .status(400)
+            .send({ error: "Missing required comment fields" });
+
+        comment.createdAt = new Date().toISOString();
+        const result = await commentCollection.insertOne(comment);
+        res.send(result);
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ error: "Failed to post comment" });
+      }
+    });
+
+    // get comments for a lesson
+    app.get("/comments", async (req, res) => {
+      try {
+        const { lessonId } = req.query;
+        if (!lessonId)
+          return res.status(400).send({ error: "Missing lessonId query" });
+
+        const comments = await commentCollection
+          .find({ lessonId })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.send(comments);
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ error: "Failed to fetch comments" });
+      }
+    });
+
+    // DELETE comment by ID
+    app.delete("/comments/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const result = await commentCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+        res.send(result);
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ error: "Failed to delete comment" });
+      }
+    });
+
+        app.get("/", (req, res) => {
+      res.send("Welcome to The Life Journal!");
+    });
+
+    app.listen(port, () => {
+      console.log(`The Life Journal is listening on port ${port}`);
+    });
+
+    // Start server
+    app.listen(port, () => {
+      console.log(`The Life Journal is listening on port ${port}`);
+    });
+  } catch (err) {
+    console.error(err);
+    process.exit(1);
   }
 }
-run().catch(console.dir);
 
-app.get("/", (req, res) => {
-  res.send("Welcome to The Life Journal!");
-});
-
-app.listen(port, () => {
-  console.log(`The Life Journal is listening on port ${port}`);
-});
+run();
