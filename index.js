@@ -7,8 +7,58 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET);
 const app = express();
 const port = process.env.PORT || 3000;
 
+const admin = require("firebase-admin");
+
+const serviceAccount = require("./the-life-journal-firebase-adminsdk.json");
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
 app.use(cors());
 app.use(express.json());
+
+const verifyFBToken = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader) {
+    return res.status(401).send({ message: "Unauthorized access" });
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.tokenEmail = decoded.email; 
+    next();
+  } catch (error) {
+    return res.status(401).send({ message: "Unauthorized access" });
+  }
+};
+
+const verifyLessonOwnerOrAdmin = async (req, res, next) => {
+  const lessonId = req.params.id;
+  const email = req.tokenEmail;
+
+  const lesson = await lessonCollection.findOne({
+    _id: new ObjectId(lessonId),
+  });
+
+  if (!lesson) {
+    return res.status(404).send({ message: "Lesson not found" });
+  }
+
+  const user = await userCollection.findOne({ email });
+
+  const isOwner = lesson.email === email;
+  const isAdmin = user?.role === "admin";
+
+  if (!isOwner && !isAdmin) {
+    return res.status(403).send({ message: "Forbidden action" });
+  }
+
+  next();
+};
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.lpz93gz.mongodb.net/?appName=Cluster0`;
 
@@ -34,6 +84,16 @@ async function run() {
     const userCollection = db.collection("users");
     const commentCollection = db.collection("comments");
     const reportCollection = db.collection("lessonReports");
+
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.tokenEmail;
+      const user = await userCollection.findOne({ email });
+
+      if (user?.role !== "admin") {
+        return res.status(403).send({ message: "Only Admin can access" });
+      }
+      next();
+    };
 
     // get lesson, and filtering for similar lessons
     app.get("/lessons", async (req, res) => {
@@ -71,6 +131,44 @@ async function run() {
       }
     });
 
+    // get admin dashboard homepage overviews
+    app.get(
+      "/admin/analytics",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        const totalUsers = await userCollection.countDocuments();
+
+        const publicLessons = await lessonCollection.countDocuments({
+          privacy: "public",
+        });
+
+        const flaggedLessons = await reportCollection.countDocuments();
+
+        const todayLessons = await lessonCollection.countDocuments({
+          createdAt: {
+            $gte: new Date(new Date().setHours(0, 0, 0, 0)),
+          },
+        });
+
+        const topContributor = await lessonCollection
+          .aggregate([
+            { $group: { _id: "$email", count: { $sum: 1 } } },
+            { $sort: { count: -1 } },
+            { $limit: 1 },
+          ])
+          .toArray();
+
+        res.send({
+          totalUsers,
+          publicLessons,
+          flaggedLessons,
+          todayLessons,
+          topContributor: topContributor[0]?._id || "N/A",
+        });
+      }
+    );
+
     // GET lesson by ID
     app.get("/lessons/:id", async (req, res) => {
       try {
@@ -100,18 +198,24 @@ async function run() {
     });
 
     // DELETE lesson by ID
-    app.delete("/lessons/:id", async (req, res) => {
-      try {
-        const id = req.params.id;
-        const result = await lessonCollection.deleteOne({
-          _id: new ObjectId(id),
-        });
-        res.send(result);
-      } catch (error) {
-        console.error(error);
-        res.status(500).send({ error: "Failed to delete lesson" });
+    // app.delete("/lessons/:id", async (req, res) => {
+    app.delete(
+      "/lessons/:id",
+      verifyFBToken,
+      verifyLessonOwnerOrAdmin,
+      async (req, res) => {
+        try {
+          const id = req.params.id;
+          const result = await lessonCollection.deleteOne({
+            _id: new ObjectId(id),
+          });
+          res.send(result);
+        } catch (error) {
+          console.error(error);
+          res.status(500).send({ error: "Failed to delete lesson" });
+        }
       }
-    });
+    );
 
     //  save or update user
     app.post("/users", async (req, res) => {
@@ -140,8 +244,8 @@ async function run() {
     });
 
     // payment api - module
-    //  app.post("/payment-checkout-session", verifyFBToken, async (req, res) => {
-    app.post("/payment-checkout-session", async (req, res) => {
+    app.post("/payment-checkout-session", verifyFBToken, async (req, res) => {
+      // app.post("/payment-checkout-session", async (req, res) => {
       const paymentInfo = req.body;
 
       try {
@@ -234,35 +338,41 @@ async function run() {
     });
 
     // edit lesson
-    app.put("/lessons/:id", async (req, res) => {
-      const lessonId = req.params.id;
+    // app.put("/lessons/:id", async (req, res) => {
+    app.put(
+      "/lessons/:id",
+      verifyFBToken,
+      verifyLessonOwnerOrAdmin,
+      async (req, res) => {
+        const lessonId = req.params.id;
 
-      if (!ObjectId.isValid(lessonId)) {
-        return res.status(400).send({ error: "Invalid lesson ID format" });
-      }
-
-      const updateData = req.body;
-      const { _id, ...fieldsToUpdate } = updateData; // prevent _id updates
-      fieldsToUpdate.updatedAt = new Date();
-
-      try {
-        const filter = { _id: new ObjectId(lessonId) };
-        const updateResult = await lessonCollection.updateOne(filter, {
-          $set: fieldsToUpdate,
-        });
-
-        if (updateResult.matchedCount === 0) {
-          return res.status(404).send({ message: "Lesson not found" });
+        if (!ObjectId.isValid(lessonId)) {
+          return res.status(400).send({ error: "Invalid lesson ID format" });
         }
 
-        const updatedLesson = await lessonCollection.findOne(filter);
+        const updateData = req.body;
+        const { _id, ...fieldsToUpdate } = updateData; // prevent _id updates
+        fieldsToUpdate.updatedAt = new Date();
 
-        res.send(updatedLesson);
-      } catch (error) {
-        console.error("Failed to update lesson:", error);
-        res.status(500).send({ error: "Failed to update lesson" });
+        try {
+          const filter = { _id: new ObjectId(lessonId) };
+          const updateResult = await lessonCollection.updateOne(filter, {
+            $set: fieldsToUpdate,
+          });
+
+          if (updateResult.matchedCount === 0) {
+            return res.status(404).send({ message: "Lesson not found" });
+          }
+
+          const updatedLesson = await lessonCollection.findOne(filter);
+
+          res.send(updatedLesson);
+        } catch (error) {
+          console.error("Failed to update lesson:", error);
+          res.status(500).send({ error: "Failed to update lesson" });
+        }
       }
-    });
+    );
 
     // PATCH toggle like
     app.patch("/lessons/:id/like", async (req, res) => {
@@ -527,7 +637,7 @@ async function run() {
       }
     });
 
-        app.get("/", (req, res) => {
+    app.get("/", (req, res) => {
       res.send("Welcome to The Life Journal!");
     });
 
