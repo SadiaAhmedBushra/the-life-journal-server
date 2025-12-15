@@ -9,7 +9,12 @@ const port = process.env.PORT || 3000;
 
 const admin = require("firebase-admin");
 
-const serviceAccount = require("./the-life-journal-firebase-adminsdk.json");
+admin.initializeApp({
+  credential: admin.credential.cert(
+    JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
+  ),
+});
+
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
