@@ -9,12 +9,11 @@ const port = process.env.PORT || 3000;
 
 const admin = require("firebase-admin");
 
-admin.initializeApp({
-  credential: admin.credential.cert(
-    JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
-  ),
-});
-
+const decoded = Buffer.from(
+  process.env.FIREBASE_SERVICE_ACCOUNT,
+  "base64"
+).toString("utf8");
+const serviceAccount = JSON.parse(decoded);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -34,14 +33,12 @@ const verifyFBToken = async (req, res, next) => {
 
   try {
     const decoded = await admin.auth().verifyIdToken(token);
-    req.tokenEmail = decoded.email; 
+    req.tokenEmail = decoded.email;
     next();
   } catch (error) {
     return res.status(401).send({ message: "Unauthorized access" });
   }
 };
-
-
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.lpz93gz.mongodb.net/?appName=Cluster0`;
 
@@ -69,28 +66,28 @@ async function run() {
     const reportCollection = db.collection("lessonReports");
 
     const verifyLessonOwnerOrAdmin = async (req, res, next) => {
-  const lessonId = req.params.id;
-  const email = req.tokenEmail;
+      const lessonId = req.params.id;
+      const email = req.tokenEmail;
 
-  const lesson = await lessonCollection.findOne({
-    _id: new ObjectId(lessonId),
-  });
+      const lesson = await lessonCollection.findOne({
+        _id: new ObjectId(lessonId),
+      });
 
-  if (!lesson) {
-    return res.status(404).send({ message: "Lesson not found" });
-  }
+      if (!lesson) {
+        return res.status(404).send({ message: "Lesson not found" });
+      }
 
-  const user = await userCollection.findOne({ email });
+      const user = await userCollection.findOne({ email });
 
-  const isOwner = lesson.email === email;
-  const isAdmin = user?.role === "admin";
+      const isOwner = lesson.email === email;
+      const isAdmin = user?.role === "admin";
 
-  if (!isOwner && !isAdmin) {
-    return res.status(403).send({ message: "Forbidden action" });
-  }
+      if (!isOwner && !isAdmin) {
+        return res.status(403).send({ message: "Forbidden action" });
+      }
 
-  next();
-};
+      next();
+    };
 
     const verifyAdmin = async (req, res, next) => {
       const email = req.tokenEmail;
@@ -643,6 +640,70 @@ async function run() {
         res.status(500).send({ error: "Failed to delete comment" });
       }
     });
+
+    // Admin gets users
+    app.get("/admin/users", verifyFBToken, verifyAdmin, async (req, res) => {
+      try {
+        const users = await userCollection
+          .aggregate([
+            {
+              $lookup: {
+                from: "lessons",
+                localField: "email",
+                foreignField: "email",
+                as: "lessons",
+              },
+            },
+            {
+              $addFields: {
+                totalLessons: { $size: "$lessons" },
+              },
+            },
+            {
+              $project: {
+                name: 1,
+                email: 1,
+                role: 1,
+                totalLessons: 1,
+              },
+            },
+          ])
+          .toArray();
+
+        res.send(users);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to fetch users" });
+      }
+    });
+
+    // Admin promotes users via patch
+    app.patch(
+      "/admin/users/role/:email",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        const email = req.params.email;
+
+        const result = await userCollection.updateOne(
+          { email },
+          { $set: { role: "admin" } }
+        );
+
+        res.send(result);
+      }
+    );
+
+    // Admin deletes user
+    app.delete(
+      "/admin/users/:email",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        const email = req.params.email;
+        const result = await userCollection.deleteOne({ email });
+        res.send(result);
+      }
+    );
 
     app.get("/", (req, res) => {
       res.send("Welcome to The Life Journal!");
