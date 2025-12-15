@@ -36,29 +36,7 @@ const verifyFBToken = async (req, res, next) => {
   }
 };
 
-const verifyLessonOwnerOrAdmin = async (req, res, next) => {
-  const lessonId = req.params.id;
-  const email = req.tokenEmail;
 
-  const lesson = await lessonCollection.findOne({
-    _id: new ObjectId(lessonId),
-  });
-
-  if (!lesson) {
-    return res.status(404).send({ message: "Lesson not found" });
-  }
-
-  const user = await userCollection.findOne({ email });
-
-  const isOwner = lesson.email === email;
-  const isAdmin = user?.role === "admin";
-
-  if (!isOwner && !isAdmin) {
-    return res.status(403).send({ message: "Forbidden action" });
-  }
-
-  next();
-};
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.lpz93gz.mongodb.net/?appName=Cluster0`;
 
@@ -84,6 +62,30 @@ async function run() {
     const userCollection = db.collection("users");
     const commentCollection = db.collection("comments");
     const reportCollection = db.collection("lessonReports");
+
+    const verifyLessonOwnerOrAdmin = async (req, res, next) => {
+  const lessonId = req.params.id;
+  const email = req.tokenEmail;
+
+  const lesson = await lessonCollection.findOne({
+    _id: new ObjectId(lessonId),
+  });
+
+  if (!lesson) {
+    return res.status(404).send({ message: "Lesson not found" });
+  }
+
+  const user = await userCollection.findOne({ email });
+
+  const isOwner = lesson.email === email;
+  const isAdmin = user?.role === "admin";
+
+  if (!isOwner && !isAdmin) {
+    return res.status(403).send({ message: "Forbidden action" });
+  }
+
+  next();
+};
 
     const verifyAdmin = async (req, res, next) => {
       const email = req.tokenEmail;
@@ -243,7 +245,7 @@ async function run() {
       console.log(userData);
     });
 
-    // payment api - module
+    // payment api
     app.post("/payment-checkout-session", verifyFBToken, async (req, res) => {
       // app.post("/payment-checkout-session", async (req, res) => {
       const paymentInfo = req.body;
@@ -639,10 +641,6 @@ async function run() {
 
     app.get("/", (req, res) => {
       res.send("Welcome to The Life Journal!");
-    });
-
-    app.listen(port, () => {
-      console.log(`The Life Journal is listening on port ${port}`);
     });
 
     // Start server
