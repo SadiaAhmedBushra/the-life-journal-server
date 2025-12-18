@@ -99,92 +99,232 @@ async function run() {
       next();
     };
 
-    // get lesson, and filtering for similar lessons
-    app.get("/lessons", async (req, res) => {
-      try {
-        const query = {};
 
-        if (req.query.email) query.email = req.query.email;
+// Get count of lessons created by a specific author (by email)
+app.get("/lessons/count/:email", async (req, res) => {
+  try {
+    const email = req.params.email;
+    if (!email) return res.status(400).send({ error: "Missing email" });
 
-        const { category, emotionalTone, privacy } = req.query;
+    const count = await lessonCollection.countDocuments({ email });
 
-        if (privacy) {
-          query.privacy = privacy;
-        }
+    res.send({ email, lessonsCreated: count });
+  } catch (error) {
+    console.error("Failed to fetch lesson count:", error);
+    res.status(500).send({ error: "Failed to fetch lesson count" });
+  }
+});
 
-        if (category && emotionalTone) {
-          query.$or = [{ category }, { emotionalTone }];
-        } else if (category) {
-          query.category = category;
-        } else if (emotionalTone) {
-          query.emotionalTone = emotionalTone;
-        }
+// ADMIN: Get all lessons (admin dashboard)
+app.get("/admin/lessons", verifyFBToken, verifyAdmin, async (req, res) => {
+  try {
+    const query = {};
 
-        const limit = parseInt(req.query.limit) || 0;
+    if (req.query.category) query.category = req.query.category;
+    if (req.query.privacy) query.privacy = req.query.privacy;
+    if (req.query.flagged === "true") query.isFlagged = true;
 
-        const options = {
-          sort: { createdAt: -1 },
-          ...(limit > 0 && { limit }),
-        };
+    const lessons = await lessonCollection
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
 
-        const lessons = await lessonCollection.find(query, options).toArray();
-        res.send(lessons);
-      } catch (error) {
-        console.error(error);
-        res.status(500).send({ error: "Failed to fetch lessons" });
-      }
-    });
+    res.send(lessons);
+  } catch (error) {
+    res.status(500).send({ message: "Failed to fetch lessons" });
+  }
+});
 
-    // get admin dashboard homepage overviews
-    app.get(
-      "/admin/analytics",
-      verifyFBToken,
-      verifyAdmin,
-      async (req, res) => {
-        try {
-          const publicLessons = await lessonCollection.countDocuments({
-            privacy: "public",
-          });
-          const privateLessons = await lessonCollection.countDocuments({
-            privacy: "private",
-          });
-          const flaggedLessons = await lessonCollection.countDocuments({
-            isFlagged: true,
-          });
-          const totalUsers = await userCollection.countDocuments();
+// 
+// Get author info
+app.get("/authors/:email", async (req, res) => {
+  try {
+    const email = req.params.email;
 
-          const totalReports = await reportCollection.countDocuments();
-
-          const todayLessons = await lessonCollection.countDocuments({
-            createdAt: {
-              $gte: new Date(new Date().setHours(0, 0, 0, 0)),
-            },
-          });
-
-          const topContributor = await lessonCollection
-            .aggregate([
-              { $group: { _id: "$email", count: { $sum: 1 } } },
-              { $sort: { count: -1 } },
-              { $limit: 1 },
-            ])
-            .toArray();
-
-          res.send({
-            publicLessons,
-            privateLessons,
-            flaggedLessons,
-            totalReports,
-            totalUsers,
-            todayLessons,
-            topContributor: topContributor[0]?._id || "N/A",
-          });
-        } catch (error) {
-          console.error("Failed to fetch admin analytics:", error);
-          res.status(500).send({ message: "Failed to fetch admin analytics" });
-        }
-      }
+    const author = await userCollection.findOne(
+      { email },
+      { projection: { name: 1, email: 1, photoURL: 1 } }
     );
 
+    if (!author) {
+      return res.status(404).send({ message: "Author not found" });
+    }
+
+    const lessonsCreated = await lessonCollection.countDocuments({ email });
+
+    res.send({
+      ...author,
+      lessonsCreated,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ message: "Failed to fetch author" });
+  }
+});
+
+// Get author's public lessons
+app.get("/authors/:email/lessons", async (req, res) => {
+  try {
+    const email = req.params.email;
+
+    const lessons = await lessonCollection
+      .find({ email, privacy: "public" })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.send(lessons);
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ message: "Failed to fetch author lessons" });
+  }
+});
+
+app.get("/lessons", async (req, res) => {
+  try {
+    const query = {};
+
+    if (req.query.isFeatured === "true") query.isFeatured = true;
+    if (req.query.privacy) query.privacy = req.query.privacy;
+    if (req.query.category) query.category = req.query.category;
+    if (req.query.emotionalTone) query.emotionalTone = req.query.emotionalTone;
+    if (req.query.email) query.email = req.query.email;
+    if (req.query.price) query.price = req.query.price;
+
+    const lessons = await lessonCollection
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.send(lessons);
+  } catch (error) {
+    res.status(500).send({ message: "Failed to fetch lessons" });
+  }
+});
+
+
+// updated my-lessons
+app.get("/my-lessons", verifyFBToken, async (req, res) => {
+  try {
+    const email = req.tokenEmail;
+
+    const lessons = await lessonCollection
+      .find({ email })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.send(lessons);
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ message: "Failed to fetch my lessons" });
+  }
+});
+
+// admin to check reported lessons
+
+app.get(
+  "/admin/reported-lessons",
+  verifyFBToken,
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const lessons = await lessonCollection
+        .find({ isFlagged: true })
+        .sort({ ReportCount: -1 })
+        .toArray();
+
+      res.send(lessons);
+    } catch (error) {
+      console.error(error);
+      res.status(500).send({ message: "Failed to fetch reported lessons" });
+    }
+  }
+);
+
+// admin to check report lessons reasons
+app.get(
+  "/admin/reported-lessons/:id/reports",
+  verifyFBToken,
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const lessonId = new ObjectId(req.params.id);
+
+      const reports = await reportCollection
+        .find({ lessonId })
+        .sort({ timestamp: -1 })
+        .toArray();
+
+      res.send(reports);
+    } catch (error) {
+      console.error(error);
+      res.status(500).send({ message: "Failed to fetch reports" });
+    }
+  }
+);
+
+// admin to ignore reported lessons
+app.patch(
+  "/admin/reported-lessons/ignore/:id",
+  verifyFBToken,
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const id = new ObjectId(req.params.id);
+
+      await lessonCollection.updateOne(
+        { _id: id },
+        {
+          $set: {
+            isFlagged: false,
+            ReportCount: 0,
+            Reporters: [],
+          },
+        }
+      );
+
+      await reportCollection.deleteMany({ lessonId: id });
+
+      res.send({ success: true });
+    } catch (error) {
+      console.error(error);
+      res.status(500).send({ message: "Failed to ignore reports" });
+    }
+  }
+);
+
+// updated route for similar lessons
+// GET similar lessons
+app.get("/lessons/:id/similar", async (req, res) => {
+  try {
+    const lessonId = new ObjectId(req.params.id);
+    const lesson = await lessonCollection.findOne({ _id: lessonId });
+
+    if (!lesson) {
+      return res.status(404).send({ message: "Lesson not found" });
+    }
+
+    const { category, emotionalTone } = lesson;
+
+    const similarLessons = await lessonCollection
+      .find({
+        _id: { $ne: lessonId },
+        privacy: "public",
+        $or: [
+          { category },
+          { emotionalTone }
+        ],
+      })
+      .sort({ createdAt: -1 })
+      .limit(6)
+      .toArray();
+
+    res.send(similarLessons);
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ message: "Failed to fetch similar lessons" });
+  }
+});
+  
     // GET lesson by ID
     app.get("/lessons/:id", async (req, res) => {
       try {
@@ -334,26 +474,6 @@ async function run() {
       } catch (error) {
         console.error(error);
         res.status(500).send({ error: "Failed to fetch user role" });
-      }
-    });
-
-    //  get lesson
-    app.get("/lessons/:id", async (req, res) => {
-      const id = req.params.id;
-
-      try {
-        const result = await lessonCollection.findOne({
-          _id: new ObjectId(id),
-        });
-
-        if (!result) {
-          return res.status(404).send({ message: "Lesson not found" });
-        }
-
-        res.send(result);
-      } catch (error) {
-        console.error(error);
-        res.status(500).send({ message: "Invalid ID format" });
       }
     });
 
@@ -567,52 +687,202 @@ async function run() {
     });
 
     // get for top contributors
-    app.get("/analytics/top-contributors-week", async (req, res) => {
-      try {
-        const pipeline = [
-          {
-            $addFields: {
-              createdAtDate: { $toDate: "$createdAt" },
-            },
-          },
-          {
-            $match: { createdAtDate: { $gte: monday } },
-          },
-          {
-            $group: { _id: "$email", lessonsCount: { $sum: 1 } },
-          },
-          { $sort: { lessonsCount: -1 } },
-          { $limit: 3 },
-          {
-            $lookup: {
-              from: "users",
-              localField: "_id",
-              foreignField: "email",
-              as: "userInfo",
-            },
-          },
-          { $unwind: { path: "$userInfo", preserveNullAndEmptyArrays: true } },
-          {
-            $project: {
-              userEmail: "$_id",
-              lessonsCount: 1,
-              name: "$userInfo.name",
-              _id: 0,
-            },
-          },
-        ];
+// app.get("/analytics/top-contributors-week", async (req, res) => {
+//   try {
+//     const now = new Date();
+//     const day = now.getDay(); 
+//     const diff = now.getDate() - day + (day === 0 ? -6 : 1); 
+//     const monday = new Date(now.setDate(diff));
+//     monday.setHours(0, 0, 0, 0);
 
-        const topContributors = await lessonCollection
-          .aggregate(pipeline)
-          .toArray();
-        res.json(topContributors);
-      } catch (error) {
-        console.error("Failed to fetch top contributors:", error);
-        res.status(500).json({ message: "Failed to fetch top contributors" });
-      }
+//     const pipeline = [
+//       {
+//         $addFields: {
+//           createdAtDate: { $toDate: "$createdAt" },
+//         },
+//       },
+//       {
+//         $match: { createdAtDate: { $gte: monday } },
+//       },
+//       {
+//         $group: { _id: "$email", lessonsCount: { $sum: 1 } },
+//       },
+//       { $sort: { lessonsCount: -1 } },
+//       { $limit: 3 },
+//       {
+//         $lookup: {
+//           from: "users",
+//           localField: "_id",
+//           foreignField: "email",
+//           as: "userInfo",
+//         },
+//       },
+//       { $unwind: { path: "$userInfo", preserveNullAndEmptyArrays: true } },
+//       {
+//         $project: {
+//           userEmail: "$_id",
+//           lessonsCount: 1,
+//           name: "$userInfo.name",
+//           photoURL: "$userInfo.photo",
+//           _id: 0,
+//         },
+//       },
+//     ];
+
+//     const topContributors = await lessonCollection.aggregate(pipeline).toArray();
+//     res.json(topContributors);
+//   } catch (error) {
+//     console.error("Failed to fetch top contributors:", error);
+//     res.status(500).json({ message: "Failed to fetch top contributors" });
+//   }
+// });
+// Assuming you have access to your users collection as `userCollection`
+app.get("/users/:email", async (req, res) => {
+  try {
+    const email = req.params.email;
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" });
+    }
+
+    const user = await userCollection.findOne({ email: email });
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Return only needed fields (avoid sending password etc)
+    const { name, email: userEmail, photo, role, paymentStatus, createdAt, last_loggedIn } = user;
+
+    res.json({
+      name,
+      email: userEmail,
+      photoURL: photo,   // for consistency with frontend
+      role,
+      paymentStatus,
+      createdAt,
+      last_loggedIn,
     });
+  } catch (error) {
+    console.error("Failed to fetch user info:", error);
+    res.status(500).json({ message: "Failed to fetch user info" });
+  }
+});
 
-    // get favorited lessons by a user
+    // get admin dashboard homepage overviews
+    app.get(
+      "/admin/analytics",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const publicLessons = await lessonCollection.countDocuments({
+            privacy: "public",
+          });
+          const privateLessons = await lessonCollection.countDocuments({
+            privacy: "private",
+          });
+          const flaggedLessons = await lessonCollection.countDocuments({
+            isFlagged: true,
+          });
+          const totalUsers = await userCollection.countDocuments();
+
+          const totalReports = await reportCollection.countDocuments();
+
+          const todayLessons = await lessonCollection.countDocuments({
+            createdAt: {
+              $gte: new Date(new Date().setHours(0, 0, 0, 0)),
+            },
+          });
+
+          const topContributor = await lessonCollection
+            .aggregate([
+              { $group: { _id: "$email", count: { $sum: 1 } } },
+              { $sort: { count: -1 } },
+              { $limit: 1 },
+            ])
+            .toArray();
+
+          res.send({
+            publicLessons,
+            privateLessons,
+            flaggedLessons,
+            totalReports,
+            totalUsers,
+            todayLessons,
+            topContributor: topContributor[0]?._id || "N/A",
+          });
+        } catch (error) {
+          console.error("Failed to fetch admin analytics:", error);
+          res.status(500).send({ message: "Failed to fetch admin analytics" });
+        }
+      }
+    );
+
+app.get("/analytics/top-contributors-week", async (req, res) => {
+  try {
+    const now = new Date();
+    const day = now.getDay();
+    const diff = now.getDate() - day + (day === 0 ? -6 : 1); // get Monday
+    const monday = new Date(now.setDate(diff));
+    monday.setHours(0, 0, 0, 0);
+
+    const pipeline = [
+      {
+        $addFields: {
+          createdAtDate: { $toDate: "$createdAt" },
+        },
+      },
+      {
+        $match: { createdAtDate: { $gte: monday } },
+      },
+      {
+        $group: { _id: "$email", lessonsCount: { $sum: 1 } },
+      },
+      { $sort: { lessonsCount: -1 } },
+      { $limit: 3 },
+      {
+        $lookup: {
+          from: "users",
+          localField: "_id",
+          foreignField: "email",
+          as: "userInfo",
+        },
+      },
+      { $unwind: { path: "$userInfo", preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          userEmail: "$_id",
+          lessonsCount: 1,
+          name: "$userInfo.name",
+          photoURL: "$userInfo.photo",  // <-- fixed here
+          _id: 0,
+        },
+      },
+    ];
+
+    const topContributors = await lessonCollection.aggregate(pipeline).toArray();
+    res.json(topContributors);
+  } catch (error) {
+    console.error("Failed to fetch top contributors:", error);
+    res.status(500).json({ message: "Failed to fetch top contributors" });
+  }
+});
+
+app.get("/lessons/count/:email", async (req, res) => {
+  try {
+    const { email } = req.params;
+    const count = await lessonCollection.countDocuments({ email });
+    res.json({ lessonsCreated: count });
+  } catch (error) {
+    console.error("Failed to fetch lessons count for email:", email, error);
+    res.status(500).json({ message: "Failed to fetch lessons count" });
+  }
+});
+
+
+
+
+
+// get favorited lessons by a user
     app.get("/users/favorites/:email", async (req, res) => {
       try {
         const email = req.params.email;
@@ -746,28 +1016,6 @@ async function run() {
       }
     );
 
-    // Admin gets all lessons
-    app.get("/admin/lessons", verifyFBToken, verifyAdmin, async (req, res) => {
-      try {
-        const { category, privacy, flagged } = req.query;
-
-        const query = {};
-
-        if (category) query.category = category;
-        if (privacy) query.privacy = privacy;
-        if (flagged === "true") query.isFlagged = true;
-
-        const lessons = await lessonCollection
-          .find(query)
-          .sort({ createdAt: -1 })
-          .toArray();
-
-        res.send(lessons);
-      } catch (error) {
-        res.status(500).send({ message: "Failed to fetch lessons" });
-      }
-    });
-
     // Admin patches featured lessons
     app.patch(
       "/admin/lessons/feature/:id",
@@ -832,7 +1080,6 @@ async function run() {
       res.send("Welcome to The Life Journal!");
     });
 
-    // Start server
     app.listen(port, () => {
       console.log(`The Life Journal is listening on port ${port}`);
     });
