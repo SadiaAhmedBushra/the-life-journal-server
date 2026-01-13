@@ -370,33 +370,79 @@ async function run() {
     );
 
     //  save or update user
+    // app.post("/users", async (req, res) => {
+    //   const userData = req.body;
+
+    //   userData.createdAt = new Date().toISOString();
+    //   userData.last_loggedIn = new Date().toISOString();
+    //   userData.role = "freeUser";
+
+    //   const userQuery = { email: userData.email };
+
+    //   const alreadyExists = await userCollection.findOne(userQuery);
+
+    //   if (alreadyExists) {
+    //     const result = await userCollection.updateOne(userQuery, {
+    //       $set: {
+    //         last_loggedIn: new Date().toISOString(),
+    //       },
+    //     });
+    //     return res.send(result);
+    //   }
+    //   const result = await userCollection.insertOne(userData);
+    //   res.send(result);
+
+    //   if (req.tokenEmail !== req.body.email) {
+    //     return res.status(403).send({ message: "Email mismatch" });
+    //   }
+
+    //   console.log(userData);
+    // });
+
+    // UPDATED FOR Demo Credentials
     app.post("/users", async (req, res) => {
-      const userData = req.body;
+      try {
+        const userData = req.body;
 
-      userData.createdAt = new Date().toISOString();
-      userData.last_loggedIn = new Date().toISOString();
-      userData.role = "freeUser";
+        if (!userData.email) {
+          return res.status(400).send({ message: "Email is required" });
+        }
 
-      const userQuery = { email: userData.email };
+        const userQuery = { email: userData.email };
+        const alreadyExists = await userCollection.findOne(userQuery);
 
-      const alreadyExists = await userCollection.findOne(userQuery);
+        if (alreadyExists) {
+          const result = await userCollection.updateOne(userQuery, {
+            $set: {
+              last_loggedIn: new Date().toISOString(),
+            },
+          });
+          return res.send(result);
+        }
 
-      if (alreadyExists) {
-        const result = await userCollection.updateOne(userQuery, {
-          $set: {
-            last_loggedIn: new Date().toISOString(),
-          },
-        });
-        return res.send(result);
+        // NEW USER ONLY
+        userData.createdAt = new Date().toISOString();
+        userData.last_loggedIn = new Date().toISOString();
+        userData.role = "freeUser";
+        userData.paymentStatus = "unpaid";
+
+        const result = await userCollection.insertOne(userData);
+        res.send(result);
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ message: "Server error" });
       }
-      const result = await userCollection.insertOne(userData);
-      res.send(result);
+    });
 
-      if (req.tokenEmail !== req.body.email) {
-        return res.status(403).send({ message: "Email mismatch" });
+    app.get("/users", async (req, res) => {
+      const email = req.query.email;
+
+      if (!email) {
+        return res.status(400).send({ message: "Email required" });
       }
 
-      console.log(userData);
+      const user = await userCollection.findOne({ email });
+      res.send(user);
     });
 
     // payment api
@@ -1100,7 +1146,7 @@ async function run() {
         try {
           const today = new Date();
           const pastDate = new Date();
-          pastDate.setDate(today.getDate() - 30); 
+          pastDate.setDate(today.getDate() - 30);
 
           const pipeline = [
             {
@@ -1119,7 +1165,7 @@ async function run() {
                 count: { $sum: 1 },
               },
             },
-            { $sort: { _id: 1 } }, 
+            { $sort: { _id: 1 } },
           ];
 
           const data = await userCollection.aggregate(pipeline).toArray();

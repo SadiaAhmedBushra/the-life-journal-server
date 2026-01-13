@@ -1,3 +1,4 @@
 node_modules
 .env
 the-life-journal-firebase-adminsdk.json
+.vercel
